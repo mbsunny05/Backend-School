@@ -45,9 +45,14 @@ app.use('/accountant', accountantRouter)
 /* =========================
    SERVER
 ========================= */
-const PORT = process.env.PORT || 4000;
+const PORT = process.env.PORT;
+
+app.get('/', (req, res) => {
+  res.send('Backend is running');
+});
 
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`Server running on port ${PORT}`);
 });
+
 
