@@ -1,21 +1,11 @@
 const mysql = require('mysql2');
 
-const pool = mysql.createPool({
-  host: process.env.MYSQL_HOST,
-  user: process.env.MYSQL_USER,
-  password: process.env.MYSQL_PASSWORD,
-  database: process.env.MYSQL_DATABASE,
-  port: process.env.MYSQL_PORT || 3306,
-  waitForConnections: true,
-  connectionLimit: 10,
-  queueLimit: 0
-});
+if (!process.env.MYSQL_URL) {
+  console.error('❌ MYSQL_URL is missing');
+} else {
+  console.log('✅ MYSQL_URL found');
+}
 
-console.log("DB CONFIG:", {
-    host: process.env.MYSQL_HOST,
-    user: process.env.MYSQL_USER,
-    database: process.env.MYSQL_DATABASE,
-    port: process.env.MYSQL_PORT
-  });
+const pool = mysql.createPool(process.env.MYSQL_URL);
 
 module.exports = pool;
