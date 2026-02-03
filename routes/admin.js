@@ -190,6 +190,7 @@ router.get('/class/profile/:class_id', (req, res) => {
 
 // student count per class + division
 router.get('/count/class-division/:academic_year_id', (req, res) => {
+  console.log("hhhh")
   if (!adminOnly(req, res)) return
 
   pool.query(
@@ -298,130 +299,181 @@ router.put('/student/toggle-status', (req, res) => {
    PROMOTION (BULK)
 ===================================================== */
 
-router.post('/students/promote', (req, res) => {
-  if (!adminOnly(req, res)) return
+router.post('/students/promote', adminOnly, (req, res) => {
+  const {
+    from_academic_year_id,
+    to_academic_year_id,
+    from_class_id,
+    to_class_id,
+  } = req.body
 
-  const { class_id } = req.body
+  if (
+    !from_academic_year_id ||
+    !to_academic_year_id ||
+    !from_class_id
+  ) {
+    return res.send(
+      result.createResult('Missing promotion parameters')
+    )
+  }
 
-  /* 1️⃣ Get current class + academic year */
-  pool.query(
-    `
-    SELECT
-      c.class_level,
-      c.academic_year_id
-    FROM classes c
-    WHERE c.class_id = ?
-    `,
-    [class_id],
-    (err, rows) => {
-      if (err || rows.length === 0) {
-        return res.status(400).json({
-          status: 'error',
-          message: 'Invalid class',
-        })
+  pool.getConnection((err, conn) => {
+    if (err) {
+      return res.send(result.createResult(err))
+    }
+
+    conn.beginTransaction(async err => {
+      if (err) {
+        conn.release()
+        return res.send(result.createResult(err))
       }
 
-      const currentLevel = Number(rows[0].class_level)
-      const fromYear = rows[0].academic_year_id
+      try {
+        /* =========================
+           1️⃣ GET STUDENTS TO PROMOTE
+        ========================= */
+        const [students] = await conn
+          .promise()
+          .query(
+            `
+            SELECT enrollment_id, student_master_id, roll_no
+            FROM student_enrollments
+            WHERE academic_year_id = ?
+              AND class_id = ?
+              AND status = 'active'
+          `,
+            [from_academic_year_id, from_class_id]
+          )
 
-      /* ❌ Class 10 cannot be promoted */
-      if (currentLevel === 10) {
-        return res.status(400).json({
-          status: 'error',
-          message: 'Class 10 students are passed out',
-        })
-      }
+        if (students.length === 0) {
+          throw new Error(
+            'No students found in this class to promote'
+          )
+        }
 
-      /* 2️⃣ Get NEXT academic year */
-      pool.query(
-        `
-        SELECT academic_year_id
-        FROM academic_years
-        WHERE academic_year_id > ?
-          AND is_closed = FALSE
-        ORDER BY academic_year_id
-        LIMIT 1
-        `,
-        [fromYear],
-        (err2, yearRows) => {
-          if (err2 || yearRows.length === 0) {
-            return res.status(400).json({
-              status: 'error',
-              message: 'Next academic year not found',
-            })
-          }
+        /* =========================
+           2️⃣ CLASS 10 → PASSED OUT
+        ========================= */
+        if (!to_class_id) {
+          await conn
+            .promise()
+            .query(
+              `
+              UPDATE student_enrollments
+              SET status = 'passed'
+              WHERE academic_year_id = ?
+                AND class_id = ?
+            `,
+              [from_academic_year_id, from_class_id]
+            )
 
-          const toYear = yearRows[0].academic_year_id
-          const nextLevel = String(currentLevel + 1)
+          await conn.commit()
+          conn.release()
 
-          /* 3️⃣ Get NEXT class */
-          pool.query(
+          return res.send(
+            result.createResult(
+              null,
+              'Students marked as PASSED successfully'
+            )
+          )
+        }
+
+        /* =========================
+           3️⃣ VERIFY TARGET CLASS
+        ========================= */
+        const [[targetClass]] = await conn
+          .promise()
+          .query(
             `
             SELECT class_id
             FROM classes
-            WHERE academic_year_id = ?
-              AND class_level = ?
-            `,
-            [toYear, nextLevel],
-            (err3, classRows) => {
-              if (err3 || classRows.length === 0) {
-                return res.status(400).json({
-                  status: 'error',
-                  message: 'Next class not found',
-                })
-              }
+            WHERE class_id = ?
+              AND academic_year_id = ?
+          `,
+            [to_class_id, to_academic_year_id]
+          )
 
-              const toClass = classRows[0].class_id
-
-              /* 4️⃣ PROMOTE */
-              pool.query(
-                `
-                INSERT INTO student_enrollments
-                (student_master_id, academic_year_id, class_id, roll_no, admission_date, user_id)
-                SELECT
-                  se.student_master_id,
-                  ?,
-                  ?,
-                  (@r:=@r+1),
-                  CURDATE(),
-                  se.user_id
-                FROM student_enrollments se,
-                     (SELECT @r:=0) t
-                WHERE se.class_id = ?
-                  AND se.status = 'active'
-                `,
-                [toYear, toClass, class_id],
-                err4 => {
-                  if (err4) {
-                    return res.status(500).json({
-                      status: 'error',
-                      message: err4.message,
-                    })
-                  }
-
-                  /* mark old as passed */
-                  pool.query(
-                    `
-                    UPDATE student_enrollments
-                    SET status='passed'
-                    WHERE class_id=?
-                    `,
-                    [class_id]
-                  )
-
-                  res.json({
-                    status: 'success',
-                    data: `Promoted to Class ${nextLevel}`,
-                  })
-                }
-              )
-            }
+        if (!targetClass) {
+          throw new Error(
+            'Target class does not exist in next academic year'
           )
         }
-      )
-    }
-  )
+
+        /* =========================
+           4️⃣ PREVENT DOUBLE PROMOTION
+        ========================= */
+        const [already] = await conn
+          .promise()
+          .query(
+            `
+            SELECT student_master_id
+            FROM student_enrollments
+            WHERE academic_year_id = ?
+              AND class_id = ?
+          `,
+            [to_academic_year_id, to_class_id]
+          )
+
+        if (already.length > 0) {
+          throw new Error(
+            'Students already promoted to this class'
+          )
+        }
+
+        /* =========================
+           5️⃣ INSERT NEW ENROLLMENTS
+        ========================= */
+        for (const s of students) {
+          await conn
+            .promise()
+            .query(
+              `
+              INSERT INTO student_enrollments
+              (student_master_id, academic_year_id, class_id, roll_no, status)
+              VALUES (?, ?, ?, ?, 'active')
+            `,
+              [
+                s.student_master_id,
+                to_academic_year_id,
+                to_class_id,
+                s.roll_no,
+              ]
+            )
+        }
+
+        /* =========================
+           6️⃣ MARK OLD ENROLLMENTS
+        ========================= */
+        await conn
+          .promise()
+          .query(
+            `
+            UPDATE student_enrollments
+            SET status = 'promoted'
+            WHERE academic_year_id = ?
+              AND class_id = ?
+          `,
+            [from_academic_year_id, from_class_id]
+          )
+
+        await conn.commit()
+        conn.release()
+
+        res.send(
+          result.createResult(
+            null,
+            `Successfully promoted ${students.length} students`
+          )
+        )
+      } catch (e) {
+        await conn.rollback()
+        conn.release()
+        res.send(result.createResult(e.message))
+      }
+    })
+  })
 })
+
 
 
 /* =====================================================
@@ -931,968 +983,3 @@ module.exports = router
 
 
 
-// const express = require('express')
-// const pool = require('../utils/db')
-// const result = require('../utils/result')
-// const bcrypt = require('bcrypt')
-
-// const router = express.Router()
-
-// function adminOnly(req, res) {
-//     if (!req.user || req.user.role !== 'admin') {
-//         res.send(result.createResult('Access denied: Admin only'))
-//         return false
-//     }
-//     return true
-// }
-
-// //---------------------------------------------------------
-// //DASHBOARD
-// //----------------------------------------------------------
-
-// //dashboard
-// router.get('/dashboard', (req, res) => {
-
-//     if (!adminOnly(req, res)) return
-
-//     const sql = `
-//         SELECT
-//             (SELECT COUNT(*) FROM classes) AS total_classes,
-//             (SELECT COUNT(*) FROM students) AS total_students,
-//             (SELECT COUNT(*) FROM users WHERE role = 'teacher') AS total_teachers,
-//             (SELECT COUNT(*) FROM subjects) AS total_subjects
-//     `
-
-//     pool.query(sql, (err, rows) => {
-
-//         if (err) {
-//             return res.send(result.createResult(err))
-//         }
-
-//         res.send(result.createResult(null, rows[0]))
-//     })
-// })
-
-
-
-// //-----------------------------------------------------------------------------------------
-// // ALL CLASSES RELATED APIS
-// //-----------------------------------------------------------------------------------------
-
-// //insert class
-// router.post('/class/add', (req, res) => {
-//     if (!adminOnly(req, res)) return
-  
-//     const { class_name, section, class_teacher_id } = req.body
-  
-//     if (!class_name || !section) {
-//       return res.send(
-//         result.createResult('class_name and section are required')
-//       )
-//     }
-  
-//     let sql
-//     let values
-  
-//     // ✅ CASE 1: No teacher assigned
-//     if (!class_teacher_id) {
-//       sql = `
-//         INSERT INTO classes (class_name, section, class_teacher_id)
-//         VALUES (?, ?, NULL)
-//       `
-//       values = [class_name, section]
-//     } 
-//     // ✅ CASE 2: Teacher assigned
-//     else {
-//       sql = `
-//         INSERT INTO classes (class_name, section, class_teacher_id)
-//         VALUES (?, ?, ?)
-//       `
-//       values = [class_name, section, class_teacher_id]
-//     }
-  
-//     pool.query(sql, values, (err, data) => {
-//         if (err) {
-//           if (err.code === 'ER_DUP_ENTRY') {
-//             return res.send(
-//               result.createResult('Class and section already exist')
-//             )
-//           }
-//           return res.send(
-//             result.createResult('Failed to add class')
-//           )
-//         }
-      
-//         res.send(result.createResult(null, 'Class added successfully'))
-//       })
-      
-//   })
-  
-
-// /* =====================================================
-//     GET ALL CLASSES
-// ===================================================== */
-// router.get('/class/getAll', (req, res) => {
-
-//     if (!adminOnly(req, res)) return 
-
-//     const sql = `
-//         SELECT 
-//             c.class_id,
-//             c.class_name,
-//             c.section,
-//             c.class_teacher_id
-//         FROM classes c
-//         ORDER BY c.class_name, c.section
-//     `
-//     pool.query(sql, (err, data) => {
-//         res.send(result.createResult(err, data))
-//     })
-// })
-
-// /* =====================================================
-//    ASSIGN / CHANGE CLASS TEACHER (ADMIN)
-// ===================================================== */
-// router.put('/class/assign-teacher', (req, res) => {
-//     if (!adminOnly(req, res)) return
-  
-//     const { class_id, class_teacher_id } = req.body
-  
-//     if (!class_id || !class_teacher_id) {
-//       return res.send(
-//         result.createResult('class_id and class_teacher_id required')
-//       )
-//     }
-  
-//     // 🔍 Step 1: Check role AND status
-//     const checkSql = `
-//       SELECT u.role, u.status
-//       FROM employees e
-//       JOIN users u ON e.user_id = u.user_id
-//       WHERE e.employee_id = ?
-//     `
-  
-//     pool.query(checkSql, [class_teacher_id], (err, rows) => {
-//       if (err) {
-//         return res.send(result.createResult(err))
-//       }
-  
-//       if (rows.length === 0) {
-//         return res.send(result.createResult('Invalid employee'))
-//       }
-  
-//       const { role, status } = rows[0]
-  
-//       if (role !== 'teacher') {
-//         return res.send(
-//           result.createResult('Only teachers can be assigned as class teacher')
-//         )
-//       }
-  
-//       if (status !== 'active') {
-//         return res.send(
-//           result.createResult('Inactive teacher cannot be assigned')
-//         )
-//       }
-  
-//       // ✅ Step 2: Assign teacher
-//       const updateSql = `
-//         UPDATE classes
-//         SET class_teacher_id = ?
-//         WHERE class_id = ?
-//       `
-  
-//       pool.query(updateSql, [class_teacher_id, class_id], (err, data) => {
-//         res.send(result.createResult(err, data))
-//       })
-//     })
-//   })
-  
-
-// //Get student count per class + section 
-
-// router.get('/count/class-section', (req, res) => {
-
-//     if (!adminOnly(req, res)) return
-//     const sql = `
-//         SELECT 
-//             CONCAT(c.class_name, c.section) AS class_section,
-//             COUNT(s.student_id) AS total_students
-//         FROM classes c
-//         LEFT JOIN students s ON s.class_id = c.class_id
-//         GROUP BY c.class_name, c.section
-//         ORDER BY c.class_name, c.section
-//     `
-
-//     pool.query(sql, (err, rows) => {
-//         if (err) {
-//             return res.send(result.createResult(err))
-//         }
-
-//         const output = rows.map(r =>
-//             `class : ${r.class_section} : Total Student : ${r.total_students}`
-//         )
-
-//         res.send(result.createResult(null, output))
-//     })
-// })
-
-
-// //Get student count per class only
-
-// router.get('/count/class', (req, res) => {
-
-//     if (!adminOnly(req, res)) return
-//     const sql = `
-//         SELECT 
-//             c.class_name,
-//             COUNT(s.student_id) AS total_students
-//         FROM classes c
-//         LEFT JOIN students s ON s.class_id = c.class_id
-//         GROUP BY c.class_name
-//         ORDER BY c.class_name
-//     `
-
-//     pool.query(sql, (err, rows) => {
-//         if (err) {
-//             return res.send(result.createResult(err))
-//         }
-
-//         const output = rows.map(r =>
-//             `class : ${r.class_name} : Total Student : ${r.total_students}`
-//         )
-
-//         res.send(result.createResult(null, output))
-//     })
-// })
-
-// /* =====================================================
-//    GET FULL CLASS PROFILE
-// ===================================================== */
-// router.get('/class-profile/:id', (req, res) => {
-
-//     if (!adminOnly(req, res)) return
-//     const sql = `
-//         SELECT 
-//         c.class_name,
-//         c.section,
-//         CONCAT_WS(' ', e.fname, e.lname) AS class_teacher,
-//         COUNT(s.student_id) AS total_students
-//         FROM classes c
-//         LEFT JOIN employees e ON c.class_teacher_id = e.employee_id
-//         LEFT JOIN students s ON c.class_id = s.class_id
-//         WHERE c.class_id = ?
-//         GROUP BY c.class_id;
-
-//     `
-//     pool.query(sql, [req.params.id], (err, data) => {
-//         res.send(result.createResult(err, data))
-//     })
-// })
-
-// //------------------------------------------------------------------------------
-// //TEACHER RELATED APIS
-// //------------------------------------------------------------------------------
-
-// //Edit teachers password
-
-// router.put('/teacher/change-password', async (req, res) => {
-
-//     if (!adminOnly(req, res)) return
-
-//     const { employee_id, new_password } = req.body
-
-//     if (!employee_id || !new_password) {
-//         return res.send(result.createResult('employee_id and new_password required'))
-//     }
-
-//     // 1️⃣ Check employee role
-//     const roleSql = `
-//         SELECT u.user_id, u.role
-//         FROM employees e
-//         JOIN users u ON e.user_id = u.user_id
-//         WHERE e.employee_id = ?
-//     `
-
-//     pool.query(roleSql, [employee_id], async (err, rows) => {
-//         if (err) {
-//             return res.send(result.createResult(err))
-//         }
-
-//         if (rows.length === 0) {
-//             return res.send(result.createResult('Invalid employee'))
-//         }
-
-//         if (rows[0].role !== 'teacher') {
-//             return res.send(
-//                 result.createResult('Password can be changed only for teachers')
-//             )
-//         }
-
-//         // 2️⃣ Hash password
-//         const hashedPassword = await bcrypt.hash(new_password, 10)
-
-//         // 3️⃣ Update password
-//         const updateSql = `
-//             UPDATE users
-//             SET password = ?
-//             WHERE user_id = ?
-//         `
-
-//         pool.query(updateSql, [hashedPassword, rows[0].user_id], (err, data) => {
-//             res.send(result.createResult(err, 'Teacher password updated successfully'))
-//         })
-//     })
-// })
-
-// //Update Teacher Salary
-
-// router.put('/teacher/update-salary', (req, res) => {
-
-//     if (!adminOnly(req, res)) return
-
-//     const { employee_id, salary } = req.body
-
-//     if (!employee_id || !salary) {
-//         return res.send(result.createResult('employee_id and salary required'))
-//     }
-
-//     const roleCheckSql = `
-//         SELECT u.role
-//         FROM employees e
-//         JOIN users u ON e.user_id = u.user_id
-//         WHERE e.employee_id = ?
-//     `
-
-//     pool.query(roleCheckSql, [employee_id], (err, rows) => {
-
-//         if (err) return res.send(result.createResult(err))
-
-//         if (rows.length === 0) {
-//             return res.send(result.createResult('Invalid employee'))
-//         }
-
-//         if (rows[0].role !== 'teacher') {
-//             return res.send(
-//                 result.createResult('Salary can be updated only for teachers')
-//             )
-//         }
-
-//         const updateSql = `
-//             UPDATE employees
-//             SET salary = ?
-//             WHERE employee_id = ?
-//         `
-
-//         pool.query(updateSql, [salary, employee_id], (err) => {
-//             res.send(
-//                 result.createResult(err, 'Teacher salary updated successfully')
-//             )
-//         })
-//     })
-// })
-
-// //change teacher status
-
-// router.put('/teacher/change-status', (req, res) => {
-
-//     if (!adminOnly(req, res)) return
-
-//     const { employee_id, status } = req.body
-
-//     if (!employee_id || !['active','inactive'].includes(status)) {
-//         return res.send(result.createResult('Invalid input'))
-//     }
-
-//     const sql = `
-//         UPDATE users u
-//         JOIN employees e ON u.user_id = e.user_id
-//         SET u.status = ?
-//         WHERE e.employee_id = ? AND u.role = 'teacher'
-//     `
-
-//     pool.query(sql, [status, employee_id], (err, data) => {
-//         if (data.affectedRows === 0) {
-//             return res.send(result.createResult('Teacher not found'))
-//         }
-//         res.send(result.createResult(null, 'Teacher status updated'))
-//     })
-// })
-
-// //------------------------------------------------------------------------------
-// //Acountant RELATED APIS
-// //------------------------------------------------------------------------------
-
-// //Edit accountnt password
-
-// router.put('/accountant/change-password', async (req, res) => {
-
-//     if (!adminOnly(req, res)) return
-
-//     const { employee_id, new_password } = req.body
-
-//     if (!employee_id || !new_password) {
-//         return res.send(result.createResult('employee_id and new_password required'))
-//     }
-
-//     // 1️⃣ Check employee role
-//     const roleSql = `
-//         SELECT u.user_id, u.role
-//         FROM employees e
-//         JOIN users u ON e.user_id = u.user_id
-//         WHERE e.employee_id = ?
-//     `
-
-//     pool.query(roleSql, [employee_id], async (err, rows) => {
-
-//         if (err) {
-//             return res.send(result.createResult(err))
-//         }
-
-//         if (rows.length === 0) {
-//             return res.send(result.createResult('Invalid employee'))
-//         }
-
-//         if (rows[0].role !== 'accountant') {
-//             return res.send(
-//                 result.createResult('Password can be changed only for accountants')
-//             )
-//         }
-
-//         // 2️⃣ Hash new password
-//         const hashedPassword = await bcrypt.hash(new_password, 10)
-
-//         // 3️⃣ Update password
-//         const updateSql = `
-//             UPDATE users
-//             SET password = ?
-//             WHERE user_id = ?
-//         `
-
-//         pool.query(updateSql, [hashedPassword, rows[0].user_id], (err, data) => {
-//             res.send(
-//                 result.createResult(err, 'Accountant password updated successfully')
-//             )
-//         })
-//     })
-// })
-
-// //update accountant salary 
-
-// router.put('/accountant/update-salary', (req, res) => {
-
-//     if (!adminOnly(req, res)) return
-
-//     const { employee_id, salary } = req.body
-
-//     if (!employee_id || !salary) {
-//         return res.send(result.createResult('employee_id and salary required'))
-//     }
-
-//     const roleCheckSql = `
-//         SELECT u.role
-//         FROM employees e
-//         JOIN users u ON e.user_id = u.user_id
-//         WHERE e.employee_id = ?
-//     `
-
-//     pool.query(roleCheckSql, [employee_id], (err, rows) => {
-
-//         if (err) return res.send(result.createResult(err))
-
-//         if (rows.length === 0) {
-//             return res.send(result.createResult('Invalid employee'))
-//         }
-
-//         if (rows[0].role !== 'accountant') {
-//             return res.send(
-//                 result.createResult('Salary can be updated only for accountants')
-//             )
-//         }
-
-//         const updateSql = `
-//             UPDATE employees
-//             SET salary = ?
-//             WHERE employee_id = ?
-//         `
-
-//         pool.query(updateSql, [salary, employee_id], (err) => {
-//             res.send(
-//                 result.createResult(err, 'Accountant salary updated successfully')
-//             )
-//         })
-//     })
-// })
-
-// //change accountant status
-
-// router.put('/accountant/change-status', (req, res) => {
-
-//     if (!adminOnly(req, res)) return
-
-//     const { employee_id, status } = req.body
-
-//     if (!employee_id || !['active','inactive'].includes(status)) {
-//         return res.send(result.createResult('Invalid input'))
-//     }
-
-//     const sql = `
-//         UPDATE users u
-//         JOIN employees e ON u.user_id = e.user_id
-//         SET u.status = ?
-//         WHERE e.employee_id = ? AND u.role = 'accountant'
-//     `
-
-//     pool.query(sql, [status, employee_id], (err, data) => {
-//         if (data.affectedRows === 0) {
-//             return res.send(result.createResult('Accountant not found'))
-//         }
-//         res.send(result.createResult(null, 'Accountant status updated'))
-//     })
-// })
-
-// // ===============================
-// // GET ALL ACCOUNTANTS (ADMIN)
-// // ===============================
-// router.get('/accountant/getAll', (req, res) => {
-
-//     if (!adminOnly(req, res)) return
-
-//     const sql = `
-//         SELECT 
-//             e.employee_id,
-//             e.fname,
-//             e.salary,
-//             u.status
-//         FROM employees e
-//         JOIN users u ON e.user_id = u.user_id
-//         WHERE u.role = 'accountant'
-//         ORDER BY e.employee_id DESC
-//     `
-
-//     pool.query(sql, (err, data) => {
-//         res.send(result.createResult(err, data))
-//     })
-// })
-
-
-// //---------------------------------------------------------------------------
-// //Student Realated API
-// //---------------------------------------------------------------------------
-
-// //change password
-// router.put('/student/change-password', async (req, res) => {
-
-//     if (!adminOnly(req, res)) return
-
-//     const { student_id, new_password } = req.body
-
-//     if (!student_id || !new_password) {
-//         return res.send(
-//             result.createResult('student_id and new_password are required')
-//         )
-//     }
-
-//     // 1️⃣ Get student -> user
-//     const sql = `
-//         SELECT u.user_id, u.role
-//         FROM students s
-//         JOIN users u ON s.user_id = u.user_id
-//         WHERE s.student_id = ?
-//     `
-
-//     pool.query(sql, [student_id], async (err, rows) => {
-
-//         if (err) {
-//             return res.send(result.createResult(err))
-//         }
-
-//         if (rows.length === 0) {
-//             return res.send(
-//                 result.createResult('Student login not found')
-//             )
-//         }
-
-//         if (rows[0].role !== 'student') {
-//             return res.send(
-//                 result.createResult('Invalid student account')
-//             )
-//         }
-
-//         // 2️⃣ Hash password
-//         const hashedPassword = await bcrypt.hash(new_password, 10)
-
-//         // 3️⃣ Update password
-//         const updateSql = `
-//             UPDATE users
-//             SET password = ?
-//             WHERE user_id = ?
-//         `
-
-//         pool.query(updateSql, [hashedPassword, rows[0].user_id], (err) => {
-//             res.send(
-//                 result.createResult(err, 'Student password updated successfully')
-//             )
-//         })
-//     })
-// })
-
-// //change roll_no and class_id
-
-// router.put('/student/change-class-roll', (req, res) => {
-
-//     if (!adminOnly(req, res)) return
-
-//     const { student_id, class_id, roll_no } = req.body
-
-//     if (!student_id || !class_id || !roll_no) {
-//         return res.send(
-//             result.createResult('student_id, class_id and roll_no are required')
-//         )
-//     }
-
-//     // 1️⃣ Check if roll_no already exists in target class
-//     const checkSql = `
-//         SELECT student_id
-//         FROM students
-//         WHERE class_id = ? AND roll_no = ? AND student_id <> ?
-//     `
-
-//     pool.query(checkSql, [class_id, roll_no, student_id], (err, rows) => {
-
-//         if (err) {
-//             return res.send(result.createResult(err))
-//         }
-
-//         if (rows.length > 0) {
-//             return res.send(
-//                 result.createResult('Roll number already exists in this class')
-//             )
-//         }
-
-//         // 2️⃣ Update class & roll number
-//         const updateSql = `
-//             UPDATE students
-//             SET class_id = ?, roll_no = ?
-//             WHERE student_id = ?
-//         `
-
-//         pool.query(updateSql, [class_id, roll_no, student_id], (err, data) => {
-
-//             if (err) {
-//                 return res.send(result.createResult(err))
-//             }
-
-//             if (data.affectedRows === 0) {
-//                 return res.send(result.createResult('Student not found'))
-//             }
-
-//             res.send(
-//                 result.createResult(null, 'Student class and roll number updated successfully')
-//             )
-//         })
-//     })
-// })
-
-
-// //change status
-// router.put('/student/change-status', (req, res) => {
-
-//     if (!adminOnly(req, res)) return
-
-//     const { student_id, status } = req.body
-
-//     if (!student_id || !['active','inactive'].includes(status)) {
-//         return res.send(result.createResult('Invalid input'))
-//     }
-
-//     const sql = `
-//         UPDATE users u
-//         JOIN students s ON u.user_id = s.user_id
-//         SET u.status = ?
-//         WHERE s.student_id = ?
-//     `
-
-//     pool.query(sql, [status, student_id], (err, data) => {
-
-//         if (data.affectedRows === 0) {
-//             return res.send(
-//                 result.createResult('Student login not found or already inactive')
-//             )
-//         }
-
-//         res.send(result.createResult(null, 'Student status updated'))
-//     })
-// })
-
-// //-----------------------------------------------------------------------------------------------------------
-// //subject related ApIS
-// //-----------------------------------------------------------------------------------------------------------
-
-// /* =====================================================
-//     ADD SUBJECT (ADMIN) (add to class and teacher too)
-//     ===================================================== */
-//     router.post('/subject/add', (req, res) => {
-
-//         if (!adminOnly(req, res)) return
-    
-//         const { subject_name, class_id, teacher_id } = req.body
-    
-//         if (!subject_name || !class_id || !teacher_id) {
-//             return res.send(
-//                 result.createResult('subject_name, class_id and teacher_id are required')
-//             )
-//         }
-    
-//         // 1️⃣ Check teacher role
-//         const roleSql = `
-//             SELECT u.role
-//             FROM employees e
-//             JOIN users u ON e.user_id = u.user_id
-//             WHERE e.employee_id = ?
-//         `
-    
-//         pool.query(roleSql, [teacher_id], (err, rows) => {
-    
-//             if (err) return res.send(result.createResult(err))
-    
-//             if (rows.length === 0) {
-//                 return res.send(result.createResult('Invalid teacher'))
-//             }
-    
-//             if (rows[0].role !== 'teacher') {
-//                 return res.send(
-//                     result.createResult('Subject can be assigned only to a teacher')
-//                 )
-//             }
-    
-//             // 2️⃣ Check duplicate subject in same class
-//             const duplicateSql = `
-//                 SELECT subject_id
-//                 FROM subjects
-//                 WHERE subject_name = ? AND class_id = ?
-//             `
-    
-//             pool.query(duplicateSql, [subject_name, class_id], (err, rows) => {
-    
-//                 if (err) return res.send(result.createResult(err))
-    
-//                 if (rows.length > 0) {
-//                     return res.send(
-//                         result.createResult('This subject is already assigned to this class')
-//                     )
-//                 }
-    
-//                 // 3️⃣ Insert subject
-//                 const insertSql = `
-//                     INSERT INTO subjects (subject_name, class_id, teacher_id)
-//                     VALUES (?, ?, ?)
-//                 `
-    
-//                 pool.query(
-//                     insertSql,
-//                     [subject_name, class_id, teacher_id],
-//                     (err) => {
-//                         if (err && err.code === 'ER_DUP_ENTRY') {
-//                             return res.send(
-//                                 result.createResult('Duplicate subject for this class')
-//                             )
-//                         }
-    
-//                         res.send(
-//                             result.createResult(null, 'Subject added successfully')
-//                         )
-//                     }
-//                 )
-//             })
-//         })
-//     })
-    
-//     //get all subject as per class
-
-//     router.get('/class/:class_id/subjects', (req, res) => {
-
-//         if (!adminOnly(req, res)) return
-    
-//         const { class_id } = req.params
-    
-//         if (!class_id) {
-//             return res.send(result.createResult('class_id is required'))
-//         }
-    
-//         const sql = `
-//             SELECT 
-//                 s.subject_id,
-//                 s.subject_name,
-//                 CONCAT_WS(' ', e.fname, e.lname) AS teacher_name
-//             FROM subjects s
-//             JOIN employees e ON s.teacher_id = e.employee_id
-//             WHERE s.class_id = ?
-//             ORDER BY s.subject_name
-//         `
-    
-//         pool.query(sql, [class_id], (err, data) => {
-//             res.send(result.createResult(err, data))
-//         })
-//     })    
-
-//     //subject info by id
-
-//     router.get('/subject/:subject_id', (req, res) => {
-
-//         if (!adminOnly(req, res)) return
-    
-//         const { subject_id } = req.params
-    
-//         if (!subject_id) {
-//             return res.send(result.createResult('subject_id is required'))
-//         }
-    
-//         const sql = `
-//             SELECT 
-//                 s.subject_id,
-//                 s.subject_name,
-//                 c.class_name,
-//                 c.section,
-//                 CONCAT_WS(' ', e.fname, e.lname) AS teacher_name
-//             FROM subjects s
-//             JOIN classes c ON s.class_id = c.class_id
-//             JOIN employees e ON s.teacher_id = e.employee_id
-//             WHERE s.subject_id = ?
-//         `
-    
-//         pool.query(sql, [subject_id], (err, data) => {
-    
-//             if (err) {
-//                 return res.send(result.createResult(err))
-//             }
-    
-//             if (data.length === 0) {
-//                 return res.send(result.createResult('Subject not found'))
-//             }
-    
-//             res.send(result.createResult(null, data[0]))
-//         })
-//     })
-    
-//     //change teacher for subject
-
-//     router.put('/subject/change-teacher', (req, res) => {
-
-//         if (!adminOnly(req, res)) return
-    
-//         const { subject_id, teacher_id } = req.body
-    
-//         if (!subject_id || !teacher_id) {
-//             return res.send(
-//                 result.createResult('subject_id and teacher_id are required')
-//             )
-//         }
-    
-//         // 1️⃣ Check teacher role
-//         const roleSql = `
-//             SELECT u.role
-//             FROM employees e
-//             JOIN users u ON e.user_id = u.user_id
-//             WHERE e.employee_id = ?
-//         `
-    
-//         pool.query(roleSql, [teacher_id], (err, rows) => {
-    
-//             if (err) {
-//                 return res.send(result.createResult(err))
-//             }
-    
-//             if (rows.length === 0) {
-//                 return res.send(result.createResult('Invalid teacher'))
-//             }
-    
-//             if (rows[0].role !== 'teacher') {
-//                 return res.send(
-//                     result.createResult('Only teacher can be assigned to subject')
-//                 )
-//             }
-    
-//             // 2️⃣ Update subject teacher
-//             const updateSql = `
-//                 UPDATE subjects
-//                 SET teacher_id = ?
-//                 WHERE subject_id = ?
-//             `
-    
-//             pool.query(updateSql, [teacher_id, subject_id], (err, data) => {
-    
-//                 if (err) {
-//                     return res.send(result.createResult(err))
-//                 }
-    
-//                 if (data.affectedRows === 0) {
-//                     return res.send(result.createResult('Subject not found'))
-//                 }
-    
-//                 res.send(
-//                     result.createResult(null, 'Subject teacher updated successfully')
-//                 )
-//             })
-//         })
-//     })
-
-// //=====================================================
-// // GET ALL TEACHERS (ADMIN)
-// //=====================================================
-// router.get('/teachers', (req, res) => {
-
-//     if (!adminOnly(req, res)) return
-
-//     const sql = `
-//         SELECT 
-//             e.employee_id,
-//             e.fname,
-//             e.mname,
-//             e.lname,
-//             e.salary,
-//             e.mobile,
-//             e.email,
-//             u.status
-//         FROM employees e
-//         JOIN users u ON e.user_id = u.user_id
-//         WHERE u.role = 'teacher'
-//         ORDER BY e.fname
-//     `
-
-//     pool.query(sql, (err, data) => {
-//         res.send(result.createResult(err, data))
-//     })
-// })
-
-// //=====================================================
-// // GET ALL STUDENTS (ADMIN)
-// //=====================================================
-// router.get('/students', (req, res) => {
-
-//     if (!adminOnly(req, res)) return
-
-//     const sql = `
-//         SELECT
-//             s.student_id,
-//             s.fname,
-//             s.mname,
-//             s.lname,
-//             s.roll_no,
-//             c.class_name,
-//             c.section,
-//             u.status
-//         FROM students s
-//         LEFT JOIN users u ON s.user_id = u.user_id
-//         JOIN classes c ON s.class_id = c.class_id
-//         ORDER BY c.class_name, c.section, s.roll_no
-//     `
-
-//     pool.query(sql, (err, data) => {
-//         res.send(result.createResult(err, data))
-//     })
-// })
-
-    
-
-// module.exports = router

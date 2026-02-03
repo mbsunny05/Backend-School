@@ -9,7 +9,6 @@ const verifyToken = require('./routes/verifyToken')
 // Routes
 const userRouter = require('./routes/user')
 const teacherRouter = require('./routes/teacher')
-const principalRouter = require('./routes/principal')
 const studentRouter = require('./routes/student')
 // const classRouter = require('./routes/class')
 const subjectRouter = require('./routes/subject')
@@ -38,7 +37,6 @@ app.use(verifyToken)
 app.use('/admin', adminRouter)
 app.use('/user', userRouter)
 app.use('/teacher', teacherRouter)
-app.use('/principal', principalRouter)
 app.use('/student', studentRouter)
 // app.use('/class', classRouter)
 app.use('/subject', subjectRouter)
@@ -47,6 +45,6 @@ app.use('/accountant', accountantRouter)
 /* =========================
    SERVER
 ========================= */
-app.listen(4000, () => {
+app.listen(4000, '0.0.0.0', () => {
     console.log('Server started on port 4000')
 })

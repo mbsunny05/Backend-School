@@ -15,480 +15,350 @@ function studentOnly(req, res) {
     return true
 }
 
-// /* =====================================================
-//    1. GET OWN PROFILE
-// ===================================================== */
-// router.get('/profile', (req, res) => {
-//     if (!studentOnly(req, res)) return
+/* =========================
+   1. CURRENT ENROLLMENT SNAPSHOT
+========================= */
+router.get('/current-enrollment', (req, res) => {
+    if (!studentOnly(req, res)) return
 
-//     const sql = `
-//         SELECT 
-//             s.student_id,
-//             s.roll_no,
-//             s.reg_no,
-//             s.fname,
-//             s.lname,
-//             s.gender,
-//             s.email,
-//             s.mobile,
-//             s.address,
-//             c.class_name,
-//             c.section
-//         FROM students s
-//         JOIN classes c ON s.class_id = c.class_id
-//         WHERE s.user_id = ?
-//     `
-//     pool.query(sql, [req.user.user_id], (err, data) => {
-//         res.send(result.createResult(err, data[0]))
-//     })
-// })
+    const sql = `
+        SELECT
+            se.enrollment_id,
+            se.student_master_id,
+            se.roll_no,
+            se.admission_date,
+            ay.academic_year_id,
+            ay.year_name AS academic_year,
+            c.class_id,
+            c.class_level,
+            c.division,
+            CONCAT(e.fname,' ',IFNULL(e.lname,'')) AS class_teacher
+        FROM student_enrollments se
+        JOIN academic_years ay ON ay.academic_year_id = se.academic_year_id
+        JOIN classes c ON c.class_id = se.class_id
+        LEFT JOIN employees e ON e.employee_id = c.class_teacher_id
+        WHERE se.user_id = ?
+          AND ay.is_active = TRUE
+    `
 
-// /* =====================================================
-//    2. GET MY CLASS DETAILS
-// ===================================================== */
-// router.get('/class', (req, res) => {
-//     if (!studentOnly(req, res)) return
+    pool.query(sql, [req.user.user_id], (err, data) => {
+        if (err) return res.send(result.createResult(err))
+        if (!data.length) return res.send(result.createResult('No active enrollment found'))
+        res.send(result.createResult(null, data[0]))
+    })
+})
 
-//     const sql = `
-//         SELECT 
-//             c.class_name,
-//             c.section,
-//             CONCAT(e.fname,' ',e.lname) AS class_teacher
-//         FROM students s
-//         JOIN classes c ON s.class_id = c.class_id
-//         LEFT JOIN employees e ON c.class_teacher_id = e.employee_id
-//         WHERE s.user_id = ?
-//     `
-//     pool.query(sql, [req.user.user_id], (err, data) => {
-//         res.send(result.createResult(err, data[0]))
-//     })
-// })
+/* =========================
+   2. ALL ENROLLMENTS (HISTORY)
+========================= */
+router.get('/all-enrollments', (req, res) => {
+    if (!studentOnly(req, res)) return
 
-// /* =====================================================
-//    3. GET MY SUBJECTS
-// ===================================================== */
-// router.get('/subjects', (req, res) => {
-//     if (!studentOnly(req, res)) return
+    const sql = `
+        SELECT
+            se.enrollment_id,
+            se.roll_no,
+            c.class_level,
+            c.division,
+            ay.year_name,
+            ay.is_active,
+            ay.start_date,
+            ay.end_date
+        FROM student_enrollments se
+        JOIN classes c ON c.class_id = se.class_id
+        JOIN academic_years ay ON ay.academic_year_id = se.academic_year_id
+        WHERE se.user_id = ?
+        ORDER BY ay.start_date DESC
+    `
 
-//     const sql = `
-//         SELECT 
-//             sub.subject_name,
-//             CONCAT(e.fname,' ',e.lname) AS teacher_name
-//         FROM students s
-//         JOIN subjects sub ON s.class_id = sub.class_id
-//         JOIN employees e ON sub.teacher_id = e.employee_id
-//         WHERE s.user_id = ?
-//     `
-//     pool.query(sql, [req.user.user_id], (err, data) => {
-//         res.send(result.createResult(err, data))
-//     })
-// })
+    pool.query(sql, [req.user.user_id], (err, data) => {
+        res.send(result.createResult(err, data))
+    })
+})
 
-// /* =====================================================
-//    4. GET MY ATTENDANCE
-// ===================================================== */
-// router.get('/attendance', (req, res) => {
-//     if (!studentOnly(req, res)) return
-
-//     const sql = `
-//         SELECT attendance_date, status
-//         FROM attendance_students
-//         WHERE student_id = (
-//             SELECT student_id FROM students WHERE user_id=?
-//         )
-//         ORDER BY attendance_date DESC
-//     `
-//     pool.query(sql, [req.user.user_id], (err, data) => {
-//         res.send(result.createResult(err, data))
-//     })
-// })
-
-// /* =====================================================
-//    5. GET MY MARKS
-// ===================================================== */
-// router.get('/marks', (req, res) => {
-//     if (!studentOnly(req, res)) return
-
-//     const sql = `
-//         SELECT 
-//             sub.subject_name,
-//             m.marks_obtained,
-//             m.max_marks,
-//             m.grade
-//         FROM marks m
-//         JOIN subjects sub ON m.subject_id = sub.subject_id
-//         WHERE m.student_id = (
-//             SELECT student_id FROM students WHERE user_id=?
-//         )
-//     `
-//     pool.query(sql, [req.user.user_id], (err, data) => {
-//         res.send(result.createResult(err, data))
-//     })
-// })
-
-// /* =====================================================
-//    6. GET MY FEES
-// ===================================================== */
-// router.get('/fees', (req, res) => {
-//     if (!studentOnly(req, res)) return
-
-//     const sql = `
-//         SELECT 
-//             fc.category_name,
-//             f.amount,
-//             f.fee_month,
-//             f.fee_year,
-//             f.status,
-//             f.payment_date
-//         FROM fees f
-//         JOIN fee_categories fc ON f.category_id = fc.category_id
-//         WHERE f.student_id = (
-//             SELECT student_id FROM students WHERE user_id=?
-//         )
-//         ORDER BY f.fee_year DESC, f.fee_month DESC
-//     `
-//     pool.query(sql, [req.user.user_id], (err, data) => {
-//         res.send(result.createResult(err, data))
-//     })
-// })
-
-// //update
-// router.put('/profile/update', (req, res) => {
-//     if (!studentOnly(req, res)) return
-
-//     const { fname, mname, lname, mother_name, dob, gender, email, mobile, address } = req.body
-
-//     const sql = `
-//         UPDATE students
-//         SET 
-//             fname=?, 
-//             mname=?, 
-//             lname=?, 
-//             mother_name=?, 
-//             dob=?, 
-//             gender=?,  
-//             email=?, 
-//             mobile=?, 
-//             address=?
-//         WHERE user_id=?
-//     `
-
-//     pool.query(
-//         sql,
-//         [fname, mname, lname, mother_name, dob, gender, email, mobile, address, req.user.user_id],
-//         (err, data) => {
-//             if (err) {
-//                 return res.send(result.createResult(err))
-//             }
-
-//             if (data.affectedRows === 0) {
-//                 return res.send(
-//                     result.createResult('Profile not found or no changes made')
-//                 )
-//             }
-
-//             res.send(
-//                 result.createResult(null, 'Profile updated successfully')
-//             )
-//         }
-//     )
-// })
-
-
-// //GET RANK
-// router.get('/academics/class-rank', (req, res) => {
-//     if (!studentOnly(req, res)) return
-
-//     const sql = `
-//         SELECT 
-//             student_id,
-//             AVG(marks_obtained) AS avg_marks
-//         FROM marks
-//         WHERE student_id IN (
-//             SELECT student_id FROM students 
-//             WHERE class_id = (
-//                 SELECT class_id FROM students WHERE user_id=?
-//             )
-//         )
-//         GROUP BY student_id
-//         ORDER BY avg_marks DESC
-//     `
-//     pool.query(sql, [req.user.user_id], (err, data) => {
-//         res.send(result.createResult(err, data))
-//     })
-// })
-
-// //DASHBOARD
-// router.get('/dashboard/summary', (req, res) => {
-//     if (!studentOnly(req, res)) return
-
-//     const sql = `
-//         SELECT 
-//             (SELECT COUNT(*) FROM attendance_students 
-//              WHERE status='Present' AND student_id=s.student_id) AS present_days,
-//             (SELECT COUNT(*) FROM marks WHERE student_id=s.student_id) AS exams_given,
-//             (SELECT COUNT(*) FROM fees WHERE status='Pending' AND student_id=s.student_id) AS pending_fees
-//         FROM students s
-//         WHERE s.user_id=?
-//     `
-//     pool.query(sql, [req.user.user_id], (err, data) => {
-//         res.send(result.createResult(err, data[0]))
-//     })
-// })
-
-
-// module.exports = router
-
-// STUDENT VIEW PROFILE
+/* =========================
+   3. STUDENT PROFILE
+========================= */
 router.get('/profile', (req, res) => {
     if (!studentOnly(req, res)) return
 
     const sql = `
         SELECT
-            s.student_id,
-            s.reg_no,
-            s.roll_no,
-
-            s.fname,
-            s.mname,
-            s.lname,
-            s.mother_name,
-            s.gender,
-            s.dob,
-            s.image,
-
-            s.email,
-            s.mobile,
-            s.address,
-
-            s.admission_date,
-
-            c.class_name,
-            c.section
-        FROM students s
-        JOIN classes c ON c.class_id = s.class_id
-        WHERE s.user_id = ?
+            sm.student_master_id,
+            sm.reg_no,
+            sm.fname,
+            sm.lname,
+            sm.mother_name,
+            sm.gender,
+            sm.dob,
+            sm.email,
+            sm.mobile,
+            sm.address,
+            se.roll_no,
+            se.admission_date,
+            c.class_level,
+            c.division,
+            ay.year_name
+        FROM student_enrollments se
+        JOIN student_master sm ON sm.student_master_id = se.student_master_id
+        JOIN classes c ON c.class_id = se.class_id
+        JOIN academic_years ay ON ay.academic_year_id = se.academic_year_id
+        WHERE se.user_id = ?
+          AND ay.is_active = TRUE
     `
 
     pool.query(sql, [req.user.user_id], (err, data) => {
-
-        if (err) {
-            return res.send(result.createResult(err))
-        }
-
-        if (!data || data.length === 0) {
-            return res.send({
-                status: 'error',
-                message: 'Student record not found'
-            })
-        }
-
+        if (err) return res.send(result.createResult(err))
+        if (!data.length) return res.send(result.createResult('Student record not found'))
         res.send(result.createResult(null, data[0]))
     })
 })
 
+/* =========================
+   4. UPDATE PROFILE (MASTER DATA)
+========================= */
+router.put('/profile/update', (req, res) => {
+    if (!studentOnly(req, res)) return
 
-// STUDENT DASHBOARD
+    const { mobile, email, address } = req.body
+
+    // Get student_master_id from enrollment
+    pool.query(
+        `SELECT sm.student_master_id 
+         FROM student_enrollments se
+         JOIN student_master sm ON sm.student_master_id = se.student_master_id
+         JOIN academic_years ay ON ay.academic_year_id = se.academic_year_id
+         WHERE se.user_id = ? AND ay.is_active = TRUE`,
+        [req.user.user_id],
+        (err, rows) => {
+            if (err) return res.send(result.createResult(err))
+            if (!rows.length) return res.send(result.createResult('Student not found'))
+
+            const student_master_id = rows[0].student_master_id
+
+            pool.query(
+                'UPDATE student_master SET mobile=?, email=?, address=? WHERE student_master_id=?',
+                [mobile, email, address, student_master_id],
+                err => res.send(result.createResult(err, 'Profile updated successfully'))
+            )
+        }
+    )
+})
+
+/* =========================
+   5. DASHBOARD
+========================= */
 router.get('/dashboard', (req, res) => {
     if (!studentOnly(req, res)) return
-    console.log("inside /dashobard")
-      console.log(req.user.user_id)
 
     const sql = `
         SELECT
-            s.student_id,
-            s.roll_no,
-
-            c.class_name,
-            c.section,
-
-            CONCAT(e.fname, ' ', IFNULL(e.lname,'')) AS class_teacher,
-
-            -- Attendance summary
-            (SELECT COUNT(*)
+            se.enrollment_id,
+            se.roll_no,
+            c.class_level,
+            c.division,
+            ay.year_name,
+            CONCAT(e.fname,' ',IFNULL(e.lname,'')) AS class_teacher,
+            
+            (SELECT COUNT(*) 
              FROM attendance_students a
-             WHERE a.student_id = s.student_id) AS total_days,
-
-            (SELECT COUNT(*)
+             WHERE a.enrollment_id = se.enrollment_id) AS total_days,
+            
+            (SELECT COUNT(*) 
              FROM attendance_students a
-             WHERE a.student_id = s.student_id
-             AND a.status = 'Present') AS present_days,
-
-            -- Subjects list
-            (
-                SELECT JSON_ARRAYAGG(subject_name)
-                FROM subjects
-                WHERE class_id = s.class_id
-            ) AS subjects
-
-        FROM students s
-        JOIN classes c ON c.class_id = s.class_id
+             WHERE a.enrollment_id = se.enrollment_id AND a.status='Present') AS present_days,
+            
+            (SELECT JSON_ARRAYAGG(subject_name)
+             FROM subjects s
+             WHERE s.class_id = se.class_id
+             AND s.academic_year_id = se.academic_year_id) AS subjects
+        FROM student_enrollments se
+        JOIN classes c ON c.class_id = se.class_id
         LEFT JOIN employees e ON e.employee_id = c.class_teacher_id
-        WHERE s.user_id = ?
+        JOIN academic_years ay ON ay.academic_year_id = se.academic_year_id
+        WHERE se.user_id = ?
+          AND ay.is_active = TRUE
     `
 
     pool.query(sql, [req.user.user_id], (err, data) => {
-        if (err) {
-            return res.send(result.createResult(err))
-        }
-
-        if (!data || data.length === 0) {
-          
-            return res.send({
-                status: 'error',
-                message: 'Student record not found'
-            })
-        }
-
+        if (err) return res.send(result.createResult(err))
         res.send(result.createResult(null, data[0]))
     })
 })
 
-
-
-// STUDENT VIEW MARKS
+/* =========================
+   6. MARKS (BY ENROLLMENT)
+========================= */
 router.get('/marks', (req, res) => {
     if (!studentOnly(req, res)) return
-      console.log(req.user.user_id)
+
+    const { enrollment_id } = req.query
 
     const sql = `
         SELECT
             sub.subject_name,
-            m.exam_name,
+            ex.exam_name,
             m.marks_obtained,
             m.max_marks,
             m.grade
         FROM marks m
         JOIN subjects sub ON sub.subject_id = m.subject_id
-        JOIN students s ON s.student_id = m.student_id
-        WHERE s.user_id = ?
-        ORDER BY sub.subject_name, m.created_at
+        JOIN exams ex ON ex.exam_id = m.exam_id
+        WHERE m.enrollment_id = ?
+        ORDER BY ex.exam_name, sub.subject_name
     `
 
-    pool.query(sql, [req.user.user_id], (err, data) => {
-          console.log("inside query of marks ")
+    pool.query(sql, [enrollment_id], (err, data) => {
         res.send(result.createResult(err, data))
     })
 })
 
-// STUDENT UPDATE PROFILE
-router.put('/profile/update', (req, res) => {
-    if (!studentOnly(req, res)) return
-
-    const {
-        fname,
-        mname,
-        lname,
-        gender,
-        mother_name,
-        email,
-        mobile,
-        address,
-        dob
-    } = req.body
-
-    const sql = `
-        UPDATE students
-        SET
-            fname = ?,
-            mname = ?,
-            lname = ?,
-            gender = ?,
-            mother_name = ?,
-            email = ?,
-            mobile = ?,
-            address = ?,
-            dob = ?
-        WHERE user_id = ?
-    `
-
-    pool.query(
-        sql,
-        [
-            fname,
-            mname,
-            lname,
-            gender,
-            mother_name,
-            email,
-            mobile,
-            address,
-            dob,
-            req.user.user_id
-        ],
-        (err, resultData) => {
-
-            if (err) {
-                // Handle duplicate email / mobile clearly
-                if (err.code === 'ER_DUP_ENTRY') {
-                    return res.send({
-                        status: 'error',
-                        message: 'Email or mobile already in use'
-                    })
-                }
-                return res.send(result.createResult(err))
-            }
-
-            if (resultData.affectedRows === 0) {
-                return res.send({
-                    status: 'error',
-                    message: 'Student record not found'
-                })
-            }
-
-            res.send({
-                status: 'success',
-                message: 'Profile updated successfully'
-            })
-        }
-    )
-})
-
-
-// STUDENT ATTENDANCE DETAILED VIEW
+/* =========================
+   7. ATTENDANCE (MONTH-WISE)
+========================= */
 router.get('/attendance', (req, res) => {
     if (!studentOnly(req, res)) return
 
-    const month = req.query.month || new Date().getMonth() + 1
-    const year = req.query.year || new Date().getFullYear()
+    const { enrollment_id, month, year } = req.query
 
     const sql = `
-        SELECT
-            a.attendance_date,
-            a.status
-        FROM attendance_students a
-        JOIN students s ON s.student_id = a.student_id
-        WHERE s.user_id = ?
-        AND MONTH(a.attendance_date) = ?
-        AND YEAR(a.attendance_date) = ?
-        ORDER BY a.attendance_date
+        SELECT attendance_date, status
+        FROM attendance_students
+        WHERE enrollment_id = ?
+          AND MONTH(attendance_date) = ?
+          AND YEAR(attendance_date) = ?
+        ORDER BY attendance_date
     `
 
-    pool.query(sql, [req.user.user_id, month, year], (err, data) => {
-        if (err) {
-            return res.send(result.createResult(err))
-        }
+    pool.query(sql, [enrollment_id, month, year], (err, rows) => {
+        if (err) return res.send(result.createResult(err))
 
-        // Calculate summary
-        const total_days = data.length
-        const present_days = data.filter(d => d.status === 'Present').length
-        const absent_days = total_days - present_days
+        const present = rows.filter(r => r.status === 'Present').length
 
-        res.send({
-            status: 'success',
-            data: {
-                month,
-                year,
-                summary: {
-                    total_days,
-                    present_days,
-                    absent_days
-                },
-                records: data
-            }
-        })
+        res.send(result.createResult(null, {
+            total_days: rows.length,
+            present_days: present,
+            absent_days: rows.length - present,
+            records: rows
+        }))
     })
 })
 
+/* =========================
+   8. FEE SUMMARY
+========================= */
+router.get('/fees', (req, res) => {
+    if (!studentOnly(req, res)) return
+
+    const { enrollment_id } = req.query
+
+    const sql = `
+        SELECT
+            sfa.total_amount,
+            IFNULL(SUM(fp.amount_paid), 0) AS paid_amount,
+            (sfa.total_amount - IFNULL(SUM(fp.amount_paid), 0)) AS due_amount,
+            sfa.assigned_date
+        FROM student_fee_assignments sfa
+        LEFT JOIN fee_payments fp ON fp.enrollment_id = sfa.enrollment_id
+        WHERE sfa.enrollment_id = ?
+        GROUP BY sfa.assignment_id, sfa.total_amount, sfa.assigned_date
+    `
+
+    pool.query(sql, [enrollment_id], (err, data) => {
+        if (err) return res.send(result.createResult(err))
+        res.send(result.createResult(null, data[0] || { 
+            total_amount: 0, 
+            paid_amount: 0, 
+            due_amount: 0 
+        }))
+    })
+})
+
+/* =========================
+   9. FEE PAYMENT HISTORY
+========================= */
+router.get('/fees-history', (req, res) => {
+    if (!studentOnly(req, res)) return
+
+    const { enrollment_id } = req.query
+
+    const sql = `
+        SELECT
+            fp.payment_id,
+            fp.amount_paid,
+            fp.payment_date,
+            fp.payment_mode,
+            fp.receipt_no
+        FROM fee_payments fp
+        WHERE fp.enrollment_id = ?
+        ORDER BY fp.payment_date DESC
+    `
+
+    pool.query(sql, [enrollment_id], (err, data) => {
+        res.send(result.createResult(err, data))
+    })
+})
+
+/* =========================
+   10. PROGRESS REPORT
+========================= */
+router.get('/progress-report', (req, res) => {
+    if (!studentOnly(req, res)) return
+
+    const { enrollment_id } = req.query
+
+    const sql = `
+        SELECT
+            ex.exam_name,
+            COUNT(DISTINCT m.subject_id) as subjects_count,
+            SUM(m.marks_obtained) as total_obtained,
+            SUM(m.max_marks) as total_max,
+            ROUND((SUM(m.marks_obtained) / SUM(m.max_marks)) * 100, 2) as percentage
+        FROM marks m
+        JOIN exams ex ON ex.exam_id = m.exam_id
+        WHERE m.enrollment_id = ?
+        GROUP BY ex.exam_id, ex.exam_name
+        ORDER BY ex.exam_name
+    `
+
+    pool.query(sql, [enrollment_id], (err, data) => {
+        res.send(result.createResult(err, data))
+    })
+})
+
+/* =========================
+   11. CHANGE PASSWORD
+========================= */
+const bcrypt = require('bcrypt')
+
+router.put('/change-password', async (req, res) => {
+    if (!studentOnly(req, res)) return
+
+    const { old_password, new_password } = req.body
+
+    if (!old_password || !new_password) {
+        return res.send(result.createResult('Old and new password required'))
+    }
+
+    pool.query(
+        'SELECT password FROM users WHERE user_id=?',
+        [req.user.user_id],
+        async (err, rows) => {
+            if (err) return res.send(result.createResult(err))
+            if (!rows.length) return res.send(result.createResult('User not found'))
+
+            const valid = await bcrypt.compare(old_password, rows[0].password)
+            if (!valid) return res.send(result.createResult('Old password incorrect'))
+
+            const hashed = await bcrypt.hash(new_password, 10)
+
+            pool.query(
+                'UPDATE users SET password=? WHERE user_id=?',
+                [hashed, req.user.user_id],
+                err => res.send(result.createResult(err, 'Password updated successfully'))
+            )
+        }
+    )
+})
 
 module.exports = router
