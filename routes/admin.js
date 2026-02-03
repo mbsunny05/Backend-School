@@ -21,7 +21,128 @@ function adminOnly(req, res) {
   return true
 }
 
+// ---------------------------------
+// start here 
 
+
+// const result = require('../utils/result')
+
+
+
+/* =========================
+   ADMIN ONLY GUARD
+========================= */
+
+
+/* =====================================================
+   1️⃣ GET STUDENTS (SESSION WISE)
+   Used in: Students.jsx (table load)
+===================================================== */router.get('/students/:academic_year_id', (req, res) => {
+  if (!adminOnly(req, res)) return
+
+  const sql = `
+    SELECT
+      se.enrollment_id,
+      se.class_id,
+      se.roll_no,
+
+      sm.reg_no,
+      CONCAT(sm.fname,' ',IFNULL(sm.lname,'')) AS name,
+      c.class_level,
+      c.division
+    FROM student_enrollments se
+    JOIN student_master sm
+      ON sm.student_master_id = se.student_master_id
+    JOIN classes c
+      ON c.class_id = se.class_id
+     AND c.academic_year_id = se.academic_year_id   -- 🔥 IMPORTANT FIX
+    WHERE se.academic_year_id = ?
+    ORDER BY c.class_level, c.division, se.roll_no
+  `
+
+  pool.query(sql, [req.params.academic_year_id], (err, data) => {
+    res.send(result.createResult(err, data))
+  })
+})
+
+/* =====================================================
+   2️⃣ GET CLASSES (SESSION WISE)
+   Used in: Edit Student dialog dropdown
+===================================================== */
+router.get('/classes/:academic_year_id', (req, res) => {
+  if (!adminOnly(req, res)) return
+
+  const sql = `
+    SELECT
+      class_id,
+      class_level,
+      division
+    FROM classes
+    WHERE academic_year_id = ?
+    ORDER BY class_level, division
+  `
+
+  pool.query(sql, [req.params.academic_year_id], (err, data) => {
+    res.send(result.createResult(err, data))
+  })
+})
+
+/* =====================================================
+   3️⃣ CHANGE STUDENT CLASS & ROLL
+   Used in: Edit dialog Save
+===================================================== */
+router.put('/student/change-class-roll', (req, res) => {
+  if (!adminOnly(req, res)) return
+
+  const { enrollment_id, class_id, roll_no } = req.body
+
+  if (!enrollment_id || !class_id || !roll_no) {
+    return res.send(result.createResult('Missing required fields'))
+  }
+
+  const sql = `
+    UPDATE student_enrollments
+    SET class_id = ?, roll_no = ?
+    WHERE enrollment_id = ?
+  `
+
+  pool.query(sql, [class_id, roll_no, enrollment_id], err => {
+    res.send(result.createResult(err, 'Student updated'))
+  })
+})
+
+/* =====================================================
+   4️⃣ TOGGLE STUDENT STATUS
+   Used in: TOGGLE STATUS button
+===================================================== */
+router.put('/student/toggle-status', (req, res) => {
+  if (!adminOnly(req, res)) return
+
+  const { enrollment_id } = req.body
+
+  if (!enrollment_id) {
+    return res.send(result.createResult('Enrollment ID required'))
+  }
+
+  const sql = `
+    UPDATE student_enrollments
+    SET status =
+      CASE
+        WHEN status = 'active' THEN 'inactive'
+        ELSE 'active'
+      END
+    WHERE enrollment_id = ?
+  `
+
+  pool.query(sql, [enrollment_id], err => {
+    res.send(result.createResult(err, 'Student status updated'))
+  })
+})
+
+
+
+// end here 
+// ---------------------------------
 /* =====================================================
    ACADEMIC YEAR (SESSION)
 ===================================================== */
